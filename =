@@ -1,0 +1,90 @@
+import yaml
+import aiohttp
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import redis
+import json
+import logging
+import time
+import requests
+
+# Load config
+with open('config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+
+# Initialize Redis cache
+cache = redis.Redis(host='localhost', port=6379, db=0)
+
+# Logging setup
+logging.basicConfig(filename='apex_bot.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# Telegram notifications
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{config['telegram']['bot_token']}/sendMessage"
+    payload = {
+        "chat_id": config['telegram']['chat_id'],
+        "text": f"🚀 APEX Trading Bot (beta) (@APEX_HRRbot):\n\n{message}"
+    }
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to send Telegram message: {e}")
+
+# Async data fetching
+async def fetch_token_data():
+    url = "https://api.dexscreener.com/latest/dex/tokens"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                logging.error("Failed to fetch data")
+                return None
+
+# Cached token data
+def get_cached_token_data():
+    cached_data = cache.get('token_data')
+    if cached_data:
+        return json.loads(cached_data)
+    else:
+        token_data = asyncio.run(fetch_token_data())
+        cache.set('token_data', json.dumps(token_data), ex=300)  # Cache for 5 minutes
+        return token_data
+
+# Trade execution
+def execute_trade(token):
+    message = f"Executing trade for {token['symbol']} with {config['trade']['min_budget']} SOL."
+    logging.info(message)
+    send_telegram_message(message)
+    time.sleep(1)  # Simulate trade latency
+
+# Batch trades in parallel
+def batch_trades(filtered_tokens):
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        executor.map(execute_trade, filtered_tokens)
+
+# Apply filters
+def apply_filters(token_data):
+    filtered_tokens = []
+    for token in token_data:
+        if (token['market_cap'] >= config['filters']['min_market_cap'] and
+            token['liquidity'] >= config['filters']['min_liquidity'] and
+            token['market_cap'] <= config['filters']['max_market_cap']):
+            filtered_tokens.append(token)
+    return filtered_tokens
+
+# Main job
+def job():
+    token_data = get_cached_token_data()
+    if token_data:
+        filtered_tokens = apply_filters(token_data)
+        batch_trades(filtered_tokens)
+
+# Run the bot
+if __name__ == "__main__":
+    send_telegram_message("APEX Trading Bot started.")
+    while True:
+        job()
+        time.sleep(60)  # Run every minute
+        
